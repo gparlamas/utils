@@ -11,17 +11,29 @@
 // Debug Sanitizer Support
 // ============================================================================
 
-#ifdef __SANITIZER_INTERFACE_H__
-    #include <sanitizer/asan_interface.h>
-    #define ALLOCATOR_ASAN_ENABLED 1
-#else
-    #define ALLOCATOR_ASAN_ENABLED 0
-#endif
-
 #ifdef NDEBUG
     #define ALLOCATOR_DEBUG_MODE 0
 #else
     #define ALLOCATOR_DEBUG_MODE 1
+#endif
+
+// Try to detect and include ASAN interface
+#if ALLOCATOR_DEBUG_MODE
+    #ifdef __has_include
+        #if __has_include(<sanitizer/asan_interface.h>)
+            #include <sanitizer/asan_interface.h>
+            #define ALLOCATOR_ASAN_ENABLED 1
+        #else
+            #define ALLOCATOR_ASAN_ENABLED 0
+        #endif
+    #elif defined(__SANITIZER_INTERFACE_H__)
+        #include <sanitizer/asan_interface.h>
+        #define ALLOCATOR_ASAN_ENABLED 1
+    #else
+        #define ALLOCATOR_ASAN_ENABLED 0
+    #endif
+#else
+    #define ALLOCATOR_ASAN_ENABLED 0
 #endif
 
 #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
@@ -45,6 +57,7 @@
  * Thread-safety: NOT thread-safe. Use external synchronization if needed.
  * Returns nullptr on allocation failure instead of throwing exceptions.
  * Debug mode with ASAN: Includes memory safety checks via AddressSanitizer.
+ * Compiler support: GCC and Clang with -fsanitize=address flag.
  * */
 class MonotonicAllocator {
 public:
