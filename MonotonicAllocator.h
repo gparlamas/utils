@@ -7,6 +7,35 @@
 #include <cassert>
 #include <cstring>
 
+// ============================================================================
+// Debug Sanitizer Support
+// ============================================================================
+
+#ifdef __SANITIZER_INTERFACE_H__
+    #include <sanitizer/asan_interface.h>
+    #define ALLOCATOR_ASAN_ENABLED 1
+#else
+    #define ALLOCATOR_ASAN_ENABLED 0
+#endif
+
+#ifdef NDEBUG
+    #define ALLOCATOR_DEBUG_MODE 0
+#else
+    #define ALLOCATOR_DEBUG_MODE 1
+#endif
+
+#if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
+    #define POISON_MEMORY(addr, size) ASAN_POISON_MEMORY_REGION((addr), (size))
+    #define UNPOISON_MEMORY(addr, size) ASAN_UNPOISON_MEMORY_REGION((addr), (size))
+    #define MARK_ALLOCATED(addr, size) UNPOISON_MEMORY((addr), (size))
+    #define MARK_FREED(addr, size) POISON_MEMORY((addr), (size))
+#else
+    #define POISON_MEMORY(addr, size) do { } while (0)
+    #define UNPOISON_MEMORY(addr, size) do { } while (0)
+    #define MARK_ALLOCATED(addr, size) do { } while (0)
+    #define MARK_FREED(addr, size) do { } while (0)
+#endif
+
 /*
  * Arena style allocator that can use a pre-allocated buffer or allocate dynamically.
  * Can be initialized with an external buffer for zero-allocation scenarios.
@@ -15,6 +44,7 @@
  * 
  * Thread-safety: NOT thread-safe. Use external synchronization if needed.
  * Returns nullptr on allocation failure instead of throwing exceptions.
+ * Debug mode with ASAN: Includes memory safety checks via AddressSanitizer.
  * */
 class MonotonicAllocator {
 public:
@@ -36,7 +66,13 @@ private:
             , size(block_size)
             , pos(buf)
             , is_owned(true)
-        {}
+        {
+            #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
+            // Poison the entire buffer initially
+            POISON_MEMORY(buf, block_size);
+            pos = buf;
+            #endif
+        }
         
         // Constructor for external (non-owned) buffer
         storage(std::byte* external_buf, size_t buffer_size) noexcept
@@ -45,7 +81,13 @@ private:
             , size(buffer_size)
             , pos(buf)
             , is_owned(false)
-        {}
+        {
+            #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
+            // Poison the external buffer region
+            POISON_MEMORY(buf, buffer_size);
+            pos = buf;
+            #endif
+        }
         
         // Disable copy, allow move
         storage(const storage&) = delete;
@@ -62,6 +104,7 @@ private:
     [[nodiscard]] size_t getAvailableBytes() const noexcept {
         assert(m_current != nullptr);
         assert(m_current->pos >= m_current->buf);
+        assert(m_current->pos <= m_current->buf + m_current->size);
         return m_current->size - (m_current->pos - m_current->buf);
     }
 
@@ -70,6 +113,14 @@ public:
         while (m_buffer) {
             auto buf = m_buffer;
             m_buffer = m_buffer->next;
+            
+            #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
+            if (buf->is_owned) {
+                // Unpoison before freeing
+                UNPOISON_MEMORY(buf->buf, buf->size);
+            }
+            #endif
+            
             delete buf;
         }
     }
@@ -124,6 +175,13 @@ public:
             while (m_buffer) {
                 auto buf = m_buffer;
                 m_buffer = m_buffer->next;
+                
+                #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
+                if (buf->is_owned) {
+                    UNPOISON_MEMORY(buf->buf, buf->size);
+                }
+                #endif
+                
                 delete buf;
             }
             
@@ -161,6 +219,12 @@ public:
         if (std::align(alignment, bytes, reinterpret_cast<void*&>(aligned_pos), available)) {
             auto result = reinterpret_cast<char*>(aligned_pos);
             m_current->pos = aligned_pos + bytes;
+            
+            #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
+            // Unpoison the newly allocated region
+            MARK_ALLOCATED(result, bytes);
+            #endif
+            
             return result;
         }
         
@@ -186,6 +250,12 @@ public:
         
         auto result = reinterpret_cast<char*>(aligned_pos);
         m_current->pos = aligned_pos + bytes;
+        
+        #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
+        // Unpoison the newly allocated region
+        MARK_ALLOCATED(result, bytes);
+        #endif
+        
         return result;
     }
 
@@ -325,6 +395,11 @@ public:
         // Reset all block positions
         for (auto block = m_buffer; block; block = block->next) {
             block->pos = block->buf;
+            
+            #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
+            // Poison all blocks on rewind (invalidates previous allocations)
+            POISON_MEMORY(block->buf, block->size);
+            #endif
         }
     }
     
@@ -340,12 +415,25 @@ public:
         while (next) {
             auto tmp = next;
             next = next->next;
+            
+            #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
+            if (tmp->is_owned) {
+                UNPOISON_MEMORY(tmp->buf, tmp->size);
+            }
+            #endif
+            
             delete tmp;
         }
         
         m_buffer->next = nullptr;
         m_buffer->pos = m_buffer->buf;
         m_current = m_buffer;
+        
+        #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
+        // Poison the first block on reset
+        POISON_MEMORY(m_buffer->buf, m_buffer->size);
+        m_buffer->pos = m_buffer->buf;
+        #endif
     }
 
 private:
@@ -366,6 +454,7 @@ private:
  * A stateful allocator to be used with std::vector/deque only.
  * Thread-safety: NOT thread-safe.
  * Returns nullptr on allocation failure instead of throwing exceptions.
+ * Debug mode with ASAN: Includes memory safety checks via AddressSanitizer.
  * */
 template <class T>
 class BlockAllocator {
@@ -462,6 +551,7 @@ template <class A, class B>
  * underlying storage remains valid while using this allocator.
  * Thread-safety: NOT thread-safe.
  * Returns nullptr on allocation failure instead of throwing exceptions.
+ * Debug mode with ASAN: Includes memory safety checks via AddressSanitizer.
  * */
 template <class T>
 class PoolAllocator {
