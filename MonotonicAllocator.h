@@ -4,7 +4,6 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-#include <cmath>
 #include <cassert>
 #include <stdexcept>
 #include <cstring>
@@ -14,6 +13,8 @@
  * Can be initialized with an external buffer for zero-allocation scenarios.
  * Only allocates additional blocks when the provided buffer is exhausted.
  * It releases only dynamically allocated memory on destruction.
+ * 
+ * Thread-safety: NOT thread-safe. Use external synchronization if needed.
  * */
 class MonotonicAllocator {
 public:
@@ -24,7 +25,7 @@ private:
         std::unique_ptr<std::byte[]> owned_buf;  // Only set if we own the memory
         std::byte* buf;                          // Points to either owned or external buffer
         size_t size;
-        void* pos = nullptr;
+        std::byte* pos = nullptr;                // Changed from void* for type safety
         storage* next = nullptr;
         bool is_owned;
         
@@ -57,6 +58,13 @@ private:
     storage* m_current = nullptr;
     size_t m_block_size;
 
+    // Helper to safely calculate remaining bytes in current block
+    [[nodiscard]] size_t getAvailableBytes() const noexcept {
+        assert(m_current != nullptr);
+        assert(m_current->pos >= m_current->buf);
+        return m_current->size - (m_current->pos - m_current->buf);
+    }
+
 public:
     ~MonotonicAllocator() noexcept {
         while (m_buffer) {
@@ -68,29 +76,34 @@ public:
 
     // Constructor with external buffer (zero-allocation mode)
     explicit MonotonicAllocator(void* buffer, size_t buffer_size, size_t overflow_block_size = DefaultBlockSize) 
-        : m_block_size(overflow_block_size)
+        : m_block_size(normalizeBlockSize(overflow_block_size))
     {
-        assert(buffer != nullptr && "Buffer cannot be null");
-        assert(buffer_size > 0 && "Buffer size must be positive");
-        
-        if (m_block_size == 0) {
-            m_block_size = DefaultBlockSize;
+        if (buffer == nullptr || buffer_size == 0) {
+            throw std::invalid_argument("Buffer cannot be null and buffer_size must be positive");
         }
         
-        m_buffer = new storage(static_cast<std::byte*>(buffer), buffer_size);
-        m_current = m_buffer;
+        try {
+            m_buffer = new storage(static_cast<std::byte*>(buffer), buffer_size);
+            m_current = m_buffer;
+        } catch (...) {
+            m_buffer = nullptr;
+            m_current = nullptr;
+            throw;
+        }
     }
     
     // Constructor that allocates its own buffer
     explicit MonotonicAllocator(size_t block_size = DefaultBlockSize) 
-        : m_block_size(block_size)
+        : m_block_size(normalizeBlockSize(block_size))
     {
-        if (m_block_size == 0) {
-            m_block_size = DefaultBlockSize;
+        try {
+            m_buffer = new storage(m_block_size);
+            m_current = m_buffer;
+        } catch (...) {
+            m_buffer = nullptr;
+            m_current = nullptr;
+            throw;
         }
-        
-        m_buffer = new storage(m_block_size);
-        m_current = m_buffer;
     }
 
     // Explicitly delete copy operations
@@ -126,20 +139,28 @@ public:
         return *this;
     }
 
-    [[nodiscard]] char* allocate(size_t bytes, size_t alignment) {
-        assert(bytes > 0 && "Cannot allocate zero bytes");
-        assert((alignment & (alignment - 1)) == 0 && "Alignment must be power of 2");
+    [[nodiscard]] char* allocate(size_t bytes, size_t alignment) noexcept(false) {
+        if (bytes == 0) {
+            throw std::invalid_argument("Cannot allocate zero bytes");
+        }
+        if ((alignment & (alignment - 1)) != 0 || alignment == 0) {
+            throw std::invalid_argument("Alignment must be a power of 2");
+        }
         
         if (bytes > m_block_size) {
             throw std::bad_alloc();
         }
 
-        auto available = m_current->size - (reinterpret_cast<std::byte*>(m_current->pos) - m_current->buf);
+        assert(m_current != nullptr);
         
-        if (std::align(alignment, bytes, m_current->pos, available)) {
-            auto tmp = reinterpret_cast<char*>(m_current->pos);
-            m_current->pos = reinterpret_cast<std::byte*>(m_current->pos) + bytes;
-            return tmp;
+        // Try to allocate from current block
+        auto available = getAvailableBytes();
+        std::byte* aligned_pos = m_current->pos;
+        
+        if (std::align(alignment, bytes, reinterpret_cast<void*&>(aligned_pos), available)) {
+            auto result = reinterpret_cast<char*>(aligned_pos);
+            m_current->pos = aligned_pos + bytes;
+            return result;
         }
         
         // Need a new block - allocate dynamically
@@ -151,14 +172,16 @@ public:
             m_current = m_current->next;
         }
         
+        // Allocate from new block
+        aligned_pos = m_current->pos;
         available = m_current->size;
-        if (!std::align(alignment, bytes, m_current->pos, available)) {
+        if (!std::align(alignment, bytes, reinterpret_cast<void*&>(aligned_pos), available)) {
             throw std::bad_alloc(); // Should not happen since we checked bytes <= m_block_size
         }
         
-        auto tmp = reinterpret_cast<char*>(m_current->pos);
-        m_current->pos = reinterpret_cast<std::byte*>(m_current->pos) + bytes;
-        return tmp;
+        auto result = reinterpret_cast<char*>(aligned_pos);
+        m_current->pos = aligned_pos + bytes;
+        return result;
     }
 
     void deallocate([[maybe_unused]] char* p, [[maybe_unused]] std::size_t n) noexcept {
@@ -170,25 +193,25 @@ public:
     }
 
     [[nodiscard]] size_t availableBytesInCurrentBlock() const noexcept {
-        return m_current->size - (reinterpret_cast<std::byte*>(m_current->pos) - m_current->buf);
+        return m_current ? getAvailableBytes() : 0;
     }
 
     [[nodiscard]] size_t allocatedBlocks() const noexcept {
-        size_t i = 0;
+        size_t count = 0;
         for (auto buf = m_buffer; buf; buf = buf->next) {
-            ++i;
+            ++count;
         }
-        return i;
+        return count;
     }
     
     [[nodiscard]] size_t dynamicallyAllocatedBlocks() const noexcept {
-        size_t i = 0;
+        size_t count = 0;
         for (auto buf = m_buffer; buf; buf = buf->next) {
             if (buf->is_owned) {
-                ++i;
+                ++count;
             }
         }
-        return i;
+        return count;
     }
     
     [[nodiscard]] bool usedExternalBufferOnly() const noexcept {
@@ -200,8 +223,9 @@ public:
     }
 
     template<typename T, typename... Args>
-    [[nodiscard]] T* construct(Args&&... args) {
-        static_assert(std::alignment_of_v<T> % 2 == 0, "Type alignment must be even");
+    [[nodiscard]] T* construct(Args&&... args) noexcept(false) {
+        // Removed restrictive even-alignment requirement
+        validateAlignment<T>();
         
         if (sizeof(T) >= m_block_size) {
             throw std::bad_alloc();
@@ -210,20 +234,25 @@ public:
         auto tmp = allocate(sizeof(T), alignof(T));
         
         if constexpr (std::is_trivially_constructible_v<T, Args...> && sizeof...(Args) == 0) {
-            // For POD types with no arguments, skip constructor call entirely
+            // For POD types with no arguments, zero-initialize
+            std::memset(tmp, 0, sizeof(T));
             return reinterpret_cast<T*>(tmp);
         } else if constexpr (std::is_trivially_constructible_v<T, Args...>) {
-            // For trivially constructible types with arguments, use simple assignment
+            // For trivially constructible types with arguments, use placement new
             return new (tmp) T(std::forward<Args>(args)...);
         } else {
             // For complex types, use full constructor
-            return new (tmp) T{std::forward<Args>(args)...};
+            return new (tmp) T(std::forward<Args>(args)...);
         }
     }
     
     template<typename T>
-    [[nodiscard]] T* constructArray(size_t count) {
-        static_assert(std::alignment_of_v<T> % 2 == 0, "Type alignment must be even");
+    [[nodiscard]] T* constructArray(size_t count) noexcept(false) {
+        validateAlignment<T>();
+        
+        if (count == 0) {
+            throw std::invalid_argument("Cannot construct array with zero elements");
+        }
         
         const size_t total_size = sizeof(T) * count;
         if (total_size > m_block_size) {
@@ -234,15 +263,22 @@ public:
         T* array = reinterpret_cast<T*>(tmp);
         
         if constexpr (std::is_trivially_default_constructible_v<T>) {
-            // For POD types, no need to call constructors
-            // Can optionally zero-initialize if needed
-            if constexpr (std::is_scalar_v<T>) {
-                std::memset(tmp, 0, total_size);
-            }
+            // For POD types, zero-initialize
+            std::memset(tmp, 0, total_size);
         } else {
             // For non-POD types, construct each element
-            for (size_t i = 0; i < count; ++i) {
-                new (&array[i]) T{};
+            try {
+                for (size_t i = 0; i < count; ++i) {
+                    new (&array[i]) T{};
+                }
+            } catch (...) {
+                // Destroy already constructed elements in reverse order
+                for (size_t i = count; i > 0; --i) {
+                    if constexpr (!std::is_trivially_destructible_v<T>) {
+                        array[i - 1].~T();
+                    }
+                }
+                throw;
             }
         }
         
@@ -251,7 +287,9 @@ public:
 
     template<typename T>
     void destroy(T* p) noexcept {
-        assert(p != nullptr && "Cannot destroy null pointer");
+        if (p == nullptr) {
+            return; // Safe to do nothing with null pointer
+        }
         
         if constexpr (!std::is_trivially_destructible_v<T>) {
             // Only call destructor for non-trivial types
@@ -263,10 +301,12 @@ public:
     
     template<typename T>
     void destroyArray(T* p, size_t count) noexcept {
-        assert(p != nullptr && "Cannot destroy null pointer");
+        if (p == nullptr) {
+            return; // Safe to do nothing with null pointer
+        }
         
         if constexpr (!std::is_trivially_destructible_v<T>) {
-            // Only call destructors for non-trivial types
+            // Only call destructors for non-trivial types, in reverse order
             for (size_t i = count; i > 0; --i) {
                 p[i - 1].~T();
             }
@@ -277,6 +317,7 @@ public:
     /*
      * Reuse internal storage.
      * WARNING: Only call this when ALL containers using this arena have been destroyed!
+     * This invalidates all previous allocations.
      * */
     void rewind() noexcept {
         m_current = m_buffer;
@@ -287,7 +328,8 @@ public:
     }
     
     /*
-     * Safer reset that deallocates extra blocks beyond the first one
+     * Safer reset that deallocates extra blocks beyond the first one.
+     * Keeps the first block intact for reuse.
      */
     void reset() noexcept {
         if (!m_buffer) return;
@@ -304,15 +346,35 @@ public:
         m_buffer->pos = m_buffer->buf;
         m_current = m_buffer;
     }
+
+private:
+    static constexpr size_t normalizeBlockSize(size_t size) noexcept {
+        return (size == 0) ? DefaultBlockSize : size;
+    }
+
+    template<typename T>
+    static void validateAlignment() noexcept {
+        // Alignment must be a power of 2 and at least 1
+        static_assert(std::alignment_of_v<T> > 0, "Type alignment must be positive");
+        static_assert((std::alignment_of_v<T> & (std::alignment_of_v<T> - 1)) == 0, 
+                      "Type alignment must be a power of 2");
+    }
 };
 
 /*
  * A stateful allocator to be used with std::vector/deque only.
+ * Thread-safety: NOT thread-safe.
  * */
 template <class T>
 class BlockAllocator {
 private:
-    MonotonicAllocator* m_alloc;
+    MonotonicAllocator* m_alloc = nullptr;
+
+    template <class U>
+    friend class BlockAllocator;
+
+    template <class A, class B>
+    friend bool operator==(const BlockAllocator<A>&, const BlockAllocator<B>&) noexcept;
 
 public:
     using value_type = T;
@@ -320,16 +382,18 @@ public:
     using propagate_on_container_move_assignment = std::true_type;
     using propagate_on_container_swap = std::true_type;
 
-    BlockAllocator(const BlockAllocator& p) = default;
+    BlockAllocator() = default;
+    BlockAllocator(const BlockAllocator&) = default;
     BlockAllocator(BlockAllocator&&) noexcept = default;
     BlockAllocator& operator=(const BlockAllocator&) = default;
+    BlockAllocator& operator=(BlockAllocator&&) noexcept = default;
 
     explicit BlockAllocator(MonotonicAllocator& a) noexcept : m_alloc(&a) {
-        static_assert(std::alignment_of_v<T> % 2 == 0, "Type alignment must be even");
+        validateAlignment<T>();
     }
 
     template <class U>
-    BlockAllocator(const BlockAllocator<U>& p) noexcept : m_alloc(p.m_alloc) {
+    explicit BlockAllocator(const BlockAllocator<U>& p) noexcept : m_alloc(p.m_alloc) {
     }
 
     template <class U> 
@@ -337,10 +401,16 @@ public:
         using other = BlockAllocator<U>;
     };
 
-    [[nodiscard]] T* allocate(std::size_t n) {
-        assert(n > 0 && "Cannot allocate zero elements");
+    [[nodiscard]] T* allocate(std::size_t n) noexcept(false) {
+        if (n == 0) {
+            throw std::invalid_argument("Cannot allocate zero elements");
+        }
         
-        //Allocate using our custom alloc if we can serve otherwise fallback to global alloc
+        if (m_alloc == nullptr) {
+            throw std::logic_error("BlockAllocator not initialized with MonotonicAllocator");
+        }
+        
+        // Allocate using our custom alloc if we can serve, otherwise fallback to global alloc
         if (m_alloc->spaceNeeded(sizeof(T) * n, alignof(T)) <= m_alloc->blockSize()) {
             return reinterpret_cast<T*>(m_alloc->allocate(sizeof(T) * n, alignof(T)));
         } else {
@@ -349,22 +419,28 @@ public:
     }
 
     void deallocate(T* p, std::size_t n) noexcept {
-        assert(p != nullptr && "Cannot deallocate null pointer");
+        if (p == nullptr) {
+            return; // Safe to deallocate null pointer
+        }
         
-        if (m_alloc->spaceNeeded(sizeof(T) * n, alignof(T)) > m_alloc->blockSize()) {
+        if (m_alloc != nullptr && m_alloc->spaceNeeded(sizeof(T) * n, alignof(T)) > m_alloc->blockSize()) {
             ::operator delete(p);
         }
     }
 
-    template <class A, class B>
-    friend bool operator==(const BlockAllocator<A>& x, const BlockAllocator<B>& y) noexcept;
-
-    template <class U> friend class BlockAllocator;
+private:
+    template<typename U>
+    static void validateAlignment() noexcept {
+        // Alignment must be a power of 2 and at least 1
+        static_assert(std::alignment_of_v<U> > 0, "Type alignment must be positive");
+        static_assert((std::alignment_of_v<U> & (std::alignment_of_v<U> - 1)) == 0,
+                      "Type alignment must be a power of 2");
+    }
 };
 
 template <class A, class B>
 [[nodiscard]] inline bool operator==(const BlockAllocator<A>& x, const BlockAllocator<B>& y) noexcept {
-    return &x.m_alloc == &y.m_alloc;
+    return x.m_alloc == y.m_alloc;
 }
 
 template <class A, class B>
@@ -373,13 +449,24 @@ template <class A, class B>
 }
 
 /*
- * A stateful allocator with the ability to reuse memory. Only to be used with node based containers(list,map,unordered_map etc)
+ * A stateful allocator with the ability to reuse memory. Only to be used with node-based 
+ * containers (list, map, unordered_map, etc).
+ * 
+ * WARNING: Reused pointers from the pool are NOT validated. Ensure the allocator's
+ * underlying storage remains valid while using this allocator.
+ * Thread-safety: NOT thread-safe.
  * */
 template <class T>
 class PoolAllocator {
 private:
-    MonotonicAllocator* m_alloc;
+    MonotonicAllocator* m_alloc = nullptr;
     std::vector<T*, BlockAllocator<T*>> m_pool;
+
+    template <class U>
+    friend class PoolAllocator;
+
+    template <class A, class B>
+    friend bool operator==(const PoolAllocator<A>&, const PoolAllocator<B>&) noexcept;
 
 public:
     using value_type = T;
@@ -387,16 +474,19 @@ public:
     using propagate_on_container_move_assignment = std::true_type;
     using propagate_on_container_swap = std::true_type;
 
-    PoolAllocator(const PoolAllocator& p) = default;
+    PoolAllocator() = default;
+    PoolAllocator(const PoolAllocator&) = default;
     PoolAllocator(PoolAllocator&&) noexcept = default;
     PoolAllocator& operator=(const PoolAllocator&) = default;
+    PoolAllocator& operator=(PoolAllocator&&) noexcept = default;
 
     explicit PoolAllocator(MonotonicAllocator& a) noexcept : m_alloc(&a), m_pool(BlockAllocator<T*>(a)) {
-        static_assert(std::alignment_of_v<T> % 2 == 0, "Type alignment must be even");
+        validateAlignment<T>();
     }
 
     template <class U>
-    PoolAllocator(const PoolAllocator<U>& p) noexcept : m_alloc(p.m_alloc), m_pool(BlockAllocator<T*>(*p.m_alloc)) {
+    explicit PoolAllocator(const PoolAllocator<U>& p) noexcept 
+        : m_alloc(p.m_alloc), m_pool(BlockAllocator<T*>(*p.m_alloc)) {
     }
 
     template <class U> 
@@ -406,27 +496,36 @@ public:
 
     [[nodiscard]] PoolAllocator select_on_container_copy_construction() const {
         PoolAllocator tmp(*this);
-        tmp.m_pool.clear(); // so we dont reuse same memory twice!
+        tmp.m_pool.clear(); // Prevent reusing same memory twice
         return tmp;
     }
 
-    /* Users aren't supposed to use this method directly but if you insist on doing it, you
-     * should use it ONLY with 'placement new', we cast raw bytes or a previous object in use.
-     * YOU HAVE BEEN WARNED!
+    /* 
+     * Allocates a single element or an array.
+     * For single elements, attempts to reuse from pool before allocating new memory.
+     * IMPORTANT: When using with placement new, ensure you're actually invoking it.
      */
-    [[nodiscard]] T* allocate(std::size_t n) {
-        assert(n > 0 && "Cannot allocate zero elements");
+    [[nodiscard]] T* allocate(std::size_t n) noexcept(false) {
+        if (n == 0) {
+            throw std::invalid_argument("Cannot allocate zero elements");
+        }
+        
+        if (m_alloc == nullptr) {
+            throw std::logic_error("PoolAllocator not initialized with MonotonicAllocator");
+        }
         
         if (n == 1) {
-            if (m_pool.empty()) {
-                return reinterpret_cast<T*>(m_alloc->allocate(sizeof(T), alignof(T)));
-            } else {
-                auto top = m_pool.back();
+            // Try to reuse from pool first
+            if (!m_pool.empty()) {
+                auto ptr = m_pool.back();
                 m_pool.pop_back();
-                return top;
+                return ptr;
             }
-        } else { // we only have this to service unordered_map internal bucket array...
-            //Allocate using our custom alloc if we can serve otherwise fallback to global alloc
+            // Allocate new single element
+            return reinterpret_cast<T*>(m_alloc->allocate(sizeof(T), alignof(T)));
+        } else {
+            // For arrays, allocate using our custom alloc if we can serve, 
+            // otherwise fallback to global alloc
             if (m_alloc->spaceNeeded(sizeof(T) * n, alignof(T)) <= m_alloc->blockSize()) {
                 return reinterpret_cast<T*>(m_alloc->allocate(sizeof(T) * n, alignof(T)));
             } else {
@@ -436,30 +535,38 @@ public:
     }
 
     void deallocate(T* p, std::size_t n) noexcept {
-        assert(p != nullptr && "Cannot deallocate null pointer");
+        if (p == nullptr) {
+            return; // Safe to deallocate null pointer
+        }
         
         if (n == 1) {
+            // Return single element to pool for reuse
             m_pool.push_back(p);
         } else {
-            if (m_alloc->spaceNeeded(sizeof(T) * n, alignof(T)) > m_alloc->blockSize()) {
+            // For arrays, only delete if it was allocated globally
+            if (m_alloc != nullptr && m_alloc->spaceNeeded(sizeof(T) * n, alignof(T)) > m_alloc->blockSize()) {
                 ::operator delete(p);
             }
         }
     }
 
-    template <class A, class B>
-    friend bool operator==(const PoolAllocator<A>& x, const PoolAllocator<B>& y) noexcept;
-
-    template <class U> friend class PoolAllocator;
-
     [[nodiscard]] size_t poolSize() const noexcept {
         return m_pool.size();
+    }
+
+private:
+    template<typename U>
+    static void validateAlignment() noexcept {
+        // Alignment must be a power of 2 and at least 1
+        static_assert(std::alignment_of_v<U> > 0, "Type alignment must be positive");
+        static_assert((std::alignment_of_v<U> & (std::alignment_of_v<U> - 1)) == 0,
+                      "Type alignment must be a power of 2");
     }
 };
 
 template <class A, class B>
 [[nodiscard]] inline bool operator==(const PoolAllocator<A>& x, const PoolAllocator<B>& y) noexcept {
-    return &x.m_alloc == &y.m_alloc;
+    return x.m_alloc == y.m_alloc;
 }
 
 template <class A, class B>
