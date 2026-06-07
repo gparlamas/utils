@@ -1,46 +1,8 @@
-#include <cassert>
-#include <cstring>
-#include <iostream>
+#include <catch2/catch_all.hpp>
 #include <vector>
 #include <list>
-#include <map>
 #include <string>
 #include "../MonotonicAllocator.h"
-
-// Test utilities
-class TestSuite {
-public:
-    int passed = 0;
-    int failed = 0;
-
-    void assert_true(bool condition, const char* test_name) {
-        if (condition) {
-            passed++;
-            std::cout << "✓ " << test_name << std::endl;
-        } else {
-            failed++;
-            std::cout << "✗ " << test_name << std::endl;
-        }
-    }
-
-    void assert_equal(const char* a, const char* b, const char* test_name) {
-        if (std::strcmp(a, b) == 0) {
-            passed++;
-            std::cout << "✓ " << test_name << std::endl;
-        } else {
-            failed++;
-            std::cout << "✗ " << test_name << std::endl;
-        }
-    }
-
-    void print_summary() {
-        std::cout << "\n========================================" << std::endl;
-        std::cout << "Tests passed: " << passed << std::endl;
-        std::cout << "Tests failed: " << failed << std::endl;
-        std::cout << "Total: " << (passed + failed) << std::endl;
-        std::cout << "========================================\n" << std::endl;
-    }
-};
 
 // Test data structures
 struct SimpleType {
@@ -66,190 +28,233 @@ struct ComplexType {
     }
 };
 
-struct NonTrivialType {
-    int* ptr;
-
-    NonTrivialType() : ptr(nullptr) {}
-    
-    NonTrivialType(int val) {
-        ptr = new int(val);
-    }
-
-    ~NonTrivialType() {
-        delete ptr;
-    }
-};
-
 // ============================================================================
-// MonotonicAllocator Tests
+// MonotonicAllocator Constructor Tests
 // ============================================================================
 
-void test_constructor_default(TestSuite& suite) {
-    std::cout << "\n--- Constructor Tests ---" << std::endl;
-    
+TEST_CASE("MonotonicAllocator::Constructor - Default", "[constructor]") {
     MonotonicAllocator alloc;
-    suite.assert_true(alloc.isValid(), "Default constructor creates valid allocator");
-    suite.assert_true(alloc.blockSize() == MonotonicAllocator::DefaultBlockSize, 
-                     "Default block size is set correctly");
+    REQUIRE(alloc.isValid());
+    REQUIRE(alloc.blockSize() == MonotonicAllocator::DefaultBlockSize);
 }
 
-void test_constructor_with_size(TestSuite& suite) {
+TEST_CASE("MonotonicAllocator::Constructor - Custom Size", "[constructor]") {
     MonotonicAllocator alloc(8192);
-    suite.assert_true(alloc.isValid(), "Constructor with size creates valid allocator");
-    suite.assert_true(alloc.blockSize() == 8192, "Custom block size is set");
+    REQUIRE(alloc.isValid());
+    REQUIRE(alloc.blockSize() == 8192);
 }
 
-void test_constructor_with_external_buffer(TestSuite& suite) {
+TEST_CASE("MonotonicAllocator::Constructor - Zero Size defaults", "[constructor]") {
+    MonotonicAllocator alloc(0);
+    REQUIRE(alloc.isValid());
+    REQUIRE(alloc.blockSize() == MonotonicAllocator::DefaultBlockSize);
+}
+
+TEST_CASE("MonotonicAllocator::Constructor - External Buffer", "[constructor]") {
     std::byte buffer[1024];
     MonotonicAllocator alloc(buffer, sizeof(buffer), 2048);
-    suite.assert_true(alloc.isValid(), "Constructor with external buffer is valid");
-    suite.assert_true(alloc.usedExternalBufferOnly(), "External buffer is used");
-    suite.assert_true(alloc.blockSize() == 2048, "Overflow block size is set");
+    REQUIRE(alloc.isValid());
+    REQUIRE(alloc.usedExternalBufferOnly());
+    REQUIRE(alloc.blockSize() == 2048);
 }
 
-void test_constructor_invalid_external_buffer(TestSuite& suite) {
-    MonotonicAllocator alloc1(nullptr, 1024);
-    suite.assert_true(!alloc1.isValid(), "Constructor rejects null buffer");
-
-    MonotonicAllocator alloc2(nullptr, 0);
-    suite.assert_true(!alloc2.isValid(), "Constructor rejects zero size buffer");
+TEST_CASE("MonotonicAllocator::Constructor - Invalid External Buffer (null)", "[constructor]") {
+    MonotonicAllocator alloc(nullptr, 1024);
+    REQUIRE(!alloc.isValid());
 }
 
-void test_allocate_basic(TestSuite& suite) {
-    std::cout << "\n--- Allocation Tests ---" << std::endl;
-    
+TEST_CASE("MonotonicAllocator::Constructor - Invalid External Buffer (zero size)", "[constructor]") {
+    MonotonicAllocator alloc(nullptr, 0);
+    REQUIRE(!alloc.isValid());
+}
+
+// ============================================================================
+// MonotonicAllocator Allocation Tests
+// ============================================================================
+
+TEST_CASE("MonotonicAllocator::Allocate - Basic", "[allocate]") {
     MonotonicAllocator alloc(1024);
     char* ptr = alloc.allocate(64, 1);
-    suite.assert_true(ptr != nullptr, "Basic allocation succeeds");
+    REQUIRE(ptr != nullptr);
 }
 
-void test_allocate_zero_bytes(TestSuite& suite) {
+TEST_CASE("MonotonicAllocator::Allocate - Zero Bytes", "[allocate]") {
     MonotonicAllocator alloc(1024);
     char* ptr = alloc.allocate(0, 1);
-    suite.assert_true(ptr == nullptr, "Allocate with zero bytes returns nullptr");
+    REQUIRE(ptr == nullptr);
 }
 
-void test_allocate_invalid_alignment(TestSuite& suite) {
+TEST_CASE("MonotonicAllocator::Allocate - Invalid Alignment (not power of 2)", "[allocate]") {
     MonotonicAllocator alloc(1024);
-    char* ptr = alloc.allocate(64, 3); // Not power of 2
-    suite.assert_true(ptr == nullptr, "Invalid alignment returns nullptr");
+    char* ptr = alloc.allocate(64, 3);
+    REQUIRE(ptr == nullptr);
 }
 
-void test_allocate_too_large(TestSuite& suite) {
+TEST_CASE("MonotonicAllocator::Allocate - Zero Alignment", "[allocate]") {
+    MonotonicAllocator alloc(1024);
+    char* ptr = alloc.allocate(64, 0);
+    REQUIRE(ptr == nullptr);
+}
+
+TEST_CASE("MonotonicAllocator::Allocate - Size Too Large", "[allocate]") {
     MonotonicAllocator alloc(1024);
     char* ptr = alloc.allocate(2048, 1);
-    suite.assert_true(ptr == nullptr, "Allocation larger than block returns nullptr");
+    REQUIRE(ptr == nullptr);
 }
 
-void test_allocate_alignment(TestSuite& suite) {
+TEST_CASE("MonotonicAllocator::Allocate - Alignment Respected (align 1)", "[allocate]") {
     MonotonicAllocator alloc(4096);
-    char* ptr1 = alloc.allocate(10, 1);
-    char* ptr2 = alloc.allocate(10, 16);
-    
-    suite.assert_true(ptr1 != nullptr, "Allocation with align 1 succeeds");
-    suite.assert_true(ptr2 != nullptr, "Allocation with align 16 succeeds");
-    
-    size_t addr2 = reinterpret_cast<size_t>(ptr2);
-    suite.assert_true((addr2 % 16) == 0, "Alignment is respected");
+    char* ptr = alloc.allocate(10, 1);
+    REQUIRE(ptr != nullptr);
 }
 
-void test_allocate_multiple_blocks(TestSuite& suite) {
+TEST_CASE("MonotonicAllocator::Allocate - Alignment Respected (align 16)", "[allocate]") {
+    MonotonicAllocator alloc(4096);
+    char* ptr = alloc.allocate(10, 16);
+    REQUIRE(ptr != nullptr);
+    size_t addr = reinterpret_cast<size_t>(ptr);
+    REQUIRE((addr % 16) == 0);
+}
+
+TEST_CASE("MonotonicAllocator::Allocate - Alignment Respected (align 64)", "[allocate]") {
+    MonotonicAllocator alloc(8192);
+    char* ptr = alloc.allocate(10, 64);
+    REQUIRE(ptr != nullptr);
+    size_t addr = reinterpret_cast<size_t>(ptr);
+    REQUIRE((addr % 64) == 0);
+}
+
+TEST_CASE("MonotonicAllocator::Allocate - Multiple Blocks", "[allocate]") {
     MonotonicAllocator alloc(256);
     
     std::vector<char*> ptrs;
     for (int i = 0; i < 5; ++i) {
         char* ptr = alloc.allocate(200, 1);
-        suite.assert_true(ptr != nullptr, "Allocation succeeds");
+        REQUIRE(ptr != nullptr);
         ptrs.push_back(ptr);
     }
     
-    suite.assert_true(alloc.allocatedBlocks() > 1, "Multiple blocks allocated");
+    REQUIRE(alloc.allocatedBlocks() > 1);
 }
 
-void test_available_bytes(TestSuite& suite) {
-    std::cout << "\n--- Available Space Tests ---" << std::endl;
-    
+TEST_CASE("MonotonicAllocator::Allocate - Available Space Decreases", "[allocate]") {
     MonotonicAllocator alloc(1024);
     size_t available_before = alloc.availableBytesInCurrentBlock();
     
     alloc.allocate(256, 1);
     size_t available_after = alloc.availableBytesInCurrentBlock();
     
-    suite.assert_true(available_before > available_after, 
-                     "Available bytes decreases after allocation");
-    suite.assert_true(available_before == 1024, "Initial available space is correct");
+    REQUIRE(available_before > available_after);
+    REQUIRE(available_before == 1024);
 }
 
-void test_construct_pod(TestSuite& suite) {
-    std::cout << "\n--- Construct Tests ---" << std::endl;
-    
+TEST_CASE("MonotonicAllocator::Allocate - Uninitialized Allocator Returns Null", "[allocate]") {
+    MonotonicAllocator alloc(nullptr, 0);
+    char* ptr = alloc.allocate(64, 1);
+    REQUIRE(ptr == nullptr);
+}
+
+// ============================================================================
+// MonotonicAllocator Construction Tests
+// ============================================================================
+
+TEST_CASE("MonotonicAllocator::Construct - POD Type", "[construct]") {
     MonotonicAllocator alloc(1024);
     SimpleType* obj = alloc.construct<SimpleType>();
     
-    suite.assert_true(obj != nullptr, "POD construction succeeds");
-    suite.assert_true(obj->x == 0 && obj->y == 0, "POD is zero-initialized");
+    REQUIRE(obj != nullptr);
+    REQUIRE(obj->x == 0);
+    REQUIRE(obj->y == 0);
 }
 
-void test_construct_pod_with_args(TestSuite& suite) {
-    MonotonicAllocator alloc(1024);
+TEST_CASE("MonotonicAllocator::Construct - POD Type Too Large", "[construct]") {
+    MonotonicAllocator alloc(64);
     SimpleType* obj = alloc.construct<SimpleType>();
     
-    obj->x = 42;
-    obj->y = 100;
-    
-    suite.assert_true(obj->x == 42 && obj->y == 100, "POD members set correctly");
+    REQUIRE(obj == nullptr);
 }
 
-void test_construct_complex(TestSuite& suite) {
+TEST_CASE("MonotonicAllocator::Construct - Complex Type", "[construct]") {
     MonotonicAllocator alloc(2048);
     ComplexType* obj = alloc.construct<ComplexType>(42);
     
-    suite.assert_true(obj != nullptr, "Complex type construction succeeds");
-    suite.assert_true(obj->value == 42, "Complex type constructor called");
+    REQUIRE(obj != nullptr);
+    REQUIRE(obj->value == 42);
 }
 
-void test_construct_array(TestSuite& suite) {
-    std::cout << "\n--- Array Construction Tests ---" << std::endl;
+TEST_CASE("MonotonicAllocator::Construct - Complex Type Default Constructor", "[construct]") {
+    MonotonicAllocator alloc(2048);
+    ComplexType* obj = alloc.construct<ComplexType>();
     
+    REQUIRE(obj != nullptr);
+    REQUIRE(obj->value == 0);
+}
+
+TEST_CASE("MonotonicAllocator::ConstructArray - POD Type", "[construct-array]") {
     MonotonicAllocator alloc(4096);
     SimpleType* arr = alloc.constructArray<SimpleType>(10);
     
-    suite.assert_true(arr != nullptr, "Array construction succeeds");
-    suite.assert_true(arr[0].x == 0, "Array elements are zero-initialized");
-    suite.assert_true(arr[9].y == 0, "All array elements initialized");
+    REQUIRE(arr != nullptr);
+    REQUIRE(arr[0].x == 0);
+    REQUIRE(arr[9].y == 0);
 }
 
-void test_construct_array_zero_count(TestSuite& suite) {
+TEST_CASE("MonotonicAllocator::ConstructArray - Complex Type", "[construct-array]") {
+    MonotonicAllocator alloc(8192);
+    ComplexType* arr = alloc.constructArray<ComplexType>(5);
+    
+    REQUIRE(arr != nullptr);
+    REQUIRE(arr[0].value == 0);
+    REQUIRE(arr[4].value == 0);
+}
+
+TEST_CASE("MonotonicAllocator::ConstructArray - Zero Count", "[construct-array]") {
     MonotonicAllocator alloc(1024);
     SimpleType* arr = alloc.constructArray<SimpleType>(0);
-    suite.assert_true(arr == nullptr, "Array with zero count returns nullptr");
+    REQUIRE(arr == nullptr);
 }
 
-void test_destroy_pod(TestSuite& suite) {
-    std::cout << "\n--- Destroy Tests ---" << std::endl;
-    
+TEST_CASE("MonotonicAllocator::ConstructArray - Too Large", "[construct-array]") {
+    MonotonicAllocator alloc(256);
+    SimpleType* arr = alloc.constructArray<SimpleType>(100);
+    REQUIRE(arr == nullptr);
+}
+
+// ============================================================================
+// MonotonicAllocator Destruction Tests
+// ============================================================================
+
+TEST_CASE("MonotonicAllocator::Destroy - POD Type", "[destroy]") {
     MonotonicAllocator alloc(1024);
     SimpleType* obj = alloc.construct<SimpleType>();
     alloc.destroy(obj);
-    suite.assert_true(true, "POD destruction succeeds");
+    // Should not throw or crash
 }
 
-void test_destroy_null(TestSuite& suite) {
+TEST_CASE("MonotonicAllocator::Destroy - Null Pointer", "[destroy]") {
     MonotonicAllocator alloc(1024);
     alloc.destroy<SimpleType>(nullptr);
-    suite.assert_true(true, "Destroying null pointer is safe");
+    // Should not throw or crash
 }
 
-void test_destroy_array(TestSuite& suite) {
+TEST_CASE("MonotonicAllocator::DestroyArray - POD Type", "[destroy]") {
     MonotonicAllocator alloc(4096);
     SimpleType* arr = alloc.constructArray<SimpleType>(10);
     alloc.destroyArray(arr, 10);
-    suite.assert_true(true, "Array destruction succeeds");
+    // Should not throw or crash
 }
 
-void test_rewind(TestSuite& suite) {
-    std::cout << "\n--- Rewind Tests ---" << std::endl;
-    
+TEST_CASE("MonotonicAllocator::DestroyArray - Null Pointer", "[destroy]") {
+    MonotonicAllocator alloc(1024);
+    alloc.destroyArray<SimpleType>(nullptr, 10);
+    // Should not throw or crash
+}
+
+// ============================================================================
+// MonotonicAllocator Rewind and Reset Tests
+// ============================================================================
+
+TEST_CASE("MonotonicAllocator::Rewind - Restores Space", "[rewind]") {
     MonotonicAllocator alloc(1024);
     size_t before = alloc.availableBytesInCurrentBlock();
     
@@ -259,16 +264,14 @@ void test_rewind(TestSuite& suite) {
     alloc.rewind();
     size_t after_rewind = alloc.availableBytesInCurrentBlock();
     
-    suite.assert_true(before > after_alloc, "Available space decreases");
-    suite.assert_true(after_rewind == before, "Rewind restores space");
+    REQUIRE(before > after_alloc);
+    REQUIRE(after_rewind == before);
 }
 
-void test_reset(TestSuite& suite) {
-    std::cout << "\n--- Reset Tests ---" << std::endl;
-    
+TEST_CASE("MonotonicAllocator::Reset - Keeps Single Block", "[reset]") {
     MonotonicAllocator alloc(256);
     
-    // Allocate enough to create multiple blocks
+    // Force creation of multiple blocks
     for (int i = 0; i < 3; ++i) {
         alloc.allocate(200, 1);
     }
@@ -277,56 +280,71 @@ void test_reset(TestSuite& suite) {
     alloc.reset();
     size_t blocks_after = alloc.allocatedBlocks();
     
-    suite.assert_true(blocks_before > 1, "Multiple blocks created");
-    suite.assert_true(blocks_after == 1, "Reset keeps only first block");
+    REQUIRE(blocks_before > 1);
+    REQUIRE(blocks_after == 1);
 }
 
-void test_move_semantics(TestSuite& suite) {
-    std::cout << "\n--- Move Semantics Tests ---" << std::endl;
+TEST_CASE("MonotonicAllocator::Reset - Resets Position", "[reset]") {
+    MonotonicAllocator alloc(1024);
     
+    alloc.allocate(256, 1);
+    size_t available_after_alloc = alloc.availableBytesInCurrentBlock();
+    
+    alloc.reset();
+    size_t available_after_reset = alloc.availableBytesInCurrentBlock();
+    
+    REQUIRE(available_after_reset == 1024);
+    REQUIRE(available_after_reset > available_after_alloc);
+}
+
+// ============================================================================
+// MonotonicAllocator Move Semantics Tests
+// ============================================================================
+
+TEST_CASE("MonotonicAllocator::Move Constructor", "[move]") {
     MonotonicAllocator alloc1(1024);
     char* ptr1 = alloc1.allocate(64, 1);
-    suite.assert_true(ptr1 != nullptr, "Initial allocation succeeds");
+    REQUIRE(ptr1 != nullptr);
     
     MonotonicAllocator alloc2 = std::move(alloc1);
-    suite.assert_true(alloc2.isValid(), "Move constructor transfers state");
-    suite.assert_true(!alloc1.isValid(), "Source becomes invalid");
+    
+    REQUIRE(alloc2.isValid());
+    REQUIRE(!alloc1.isValid());
 }
 
-void test_move_assignment(TestSuite& suite) {
+TEST_CASE("MonotonicAllocator::Move Assignment", "[move]") {
     MonotonicAllocator alloc1(1024);
     MonotonicAllocator alloc2(2048);
     
     alloc1.allocate(64, 1);
     
     alloc2 = std::move(alloc1);
-    suite.assert_true(alloc2.blockSize() == 1024, "Move assignment transfers block size");
+    
+    REQUIRE(alloc2.blockSize() == 1024);
+    REQUIRE(!alloc1.isValid());
 }
 
 // ============================================================================
 // BlockAllocator Tests
 // ============================================================================
 
-void test_block_allocator_default(TestSuite& suite) {
-    std::cout << "\n--- BlockAllocator Tests ---" << std::endl;
-    
+TEST_CASE("BlockAllocator::Default Constructor", "[block-allocator]") {
     BlockAllocator<int> alloc;
-    int* ptr = alloc.allocate(0);
-    suite.assert_true(ptr == nullptr, "Default BlockAllocator returns nullptr");
+    int* ptr = alloc.allocate(10);
+    REQUIRE(ptr == nullptr);
 }
 
-void test_block_allocator_with_monotonic(TestSuite& suite) {
+TEST_CASE("BlockAllocator::With MonotonicAllocator", "[block-allocator]") {
     MonotonicAllocator mono(4096);
     BlockAllocator<int> alloc(mono);
     
     int* ptr = alloc.allocate(10);
-    suite.assert_true(ptr != nullptr, "BlockAllocator with MonotonicAllocator succeeds");
+    REQUIRE(ptr != nullptr);
     
     alloc.deallocate(ptr, 10);
-    suite.assert_true(true, "Deallocation succeeds");
 }
 
-void test_block_allocator_with_vector(TestSuite& suite) {
+TEST_CASE("BlockAllocator::With std::vector", "[block-allocator]") {
     MonotonicAllocator mono(8192);
     std::vector<int, BlockAllocator<int>> vec(BlockAllocator<int>(mono));
     
@@ -334,60 +352,64 @@ void test_block_allocator_with_vector(TestSuite& suite) {
         vec.push_back(i);
     }
     
-    suite.assert_true(vec.size() == 100, "Vector with BlockAllocator works");
-    suite.assert_true(vec[50] == 50, "Vector elements correct");
+    REQUIRE(vec.size() == 100);
+    REQUIRE(vec[50] == 50);
 }
 
-void test_block_allocator_zero_allocation(TestSuite& suite) {
+TEST_CASE("BlockAllocator::Zero Allocation", "[block-allocator]") {
     MonotonicAllocator mono(1024);
     BlockAllocator<int> alloc(mono);
     
     int* ptr = alloc.allocate(0);
-    suite.assert_true(ptr == nullptr, "Zero allocation returns nullptr");
+    REQUIRE(ptr == nullptr);
 }
 
-void test_block_allocator_null_dealloc(TestSuite& suite) {
+TEST_CASE("BlockAllocator::Deallocate Null", "[block-allocator]") {
     MonotonicAllocator mono(1024);
     BlockAllocator<int> alloc(mono);
     
     alloc.deallocate(nullptr, 10);
-    suite.assert_true(true, "Deallocating null pointer is safe");
+    // Should not crash
 }
 
-void test_block_allocator_comparison(TestSuite& suite) {
+TEST_CASE("BlockAllocator::Allocator Comparison - Same Monotonic", "[block-allocator]") {
     MonotonicAllocator mono(1024);
     BlockAllocator<int> alloc1(mono);
     BlockAllocator<int> alloc2(mono);
-    BlockAllocator<double> alloc3(mono);
     
-    suite.assert_true(alloc1 == alloc2, "Same MonotonicAllocator equals");
-    suite.assert_true(alloc1 == alloc3, "Different types with same MonotonicAllocator equal");
+    REQUIRE(alloc1 == alloc2);
+    REQUIRE(!(alloc1 != alloc2));
+}
+
+TEST_CASE("BlockAllocator::Allocator Comparison - Different Types", "[block-allocator]") {
+    MonotonicAllocator mono(1024);
+    BlockAllocator<int> alloc1(mono);
+    BlockAllocator<double> alloc2(mono);
+    
+    REQUIRE(alloc1 == alloc2);
 }
 
 // ============================================================================
 // PoolAllocator Tests
 // ============================================================================
 
-void test_pool_allocator_default(TestSuite& suite) {
-    std::cout << "\n--- PoolAllocator Tests ---" << std::endl;
-    
+TEST_CASE("PoolAllocator::Default Constructor", "[pool-allocator]") {
     PoolAllocator<int> alloc;
-    int* ptr = alloc.allocate(0);
-    suite.assert_true(ptr == nullptr, "Default PoolAllocator returns nullptr");
+    int* ptr = alloc.allocate(1);
+    REQUIRE(ptr == nullptr);
 }
 
-void test_pool_allocator_with_monotonic(TestSuite& suite) {
+TEST_CASE("PoolAllocator::With MonotonicAllocator", "[pool-allocator]") {
     MonotonicAllocator mono(4096);
     PoolAllocator<int> alloc(mono);
     
     int* ptr = alloc.allocate(1);
-    suite.assert_true(ptr != nullptr, "PoolAllocator allocation succeeds");
+    REQUIRE(ptr != nullptr);
     
     alloc.deallocate(ptr, 1);
-    suite.assert_true(alloc.poolSize() == 1, "Deallocated item added to pool");
 }
 
-void test_pool_allocator_reuse(TestSuite& suite) {
+TEST_CASE("PoolAllocator::Reuse Mechanism", "[pool-allocator]") {
     MonotonicAllocator mono(4096);
     PoolAllocator<int> alloc(mono);
     
@@ -395,12 +417,14 @@ void test_pool_allocator_reuse(TestSuite& suite) {
     int* saved_ptr1 = ptr1;
     alloc.deallocate(ptr1, 1);
     
+    REQUIRE(alloc.poolSize() == 1);
+    
     int* ptr2 = alloc.allocate(1);
-    suite.assert_true(ptr2 == saved_ptr1, "Pool reuses deallocated pointer");
-    suite.assert_true(alloc.poolSize() == 0, "Pool is now empty");
+    REQUIRE(ptr2 == saved_ptr1);
+    REQUIRE(alloc.poolSize() == 0);
 }
 
-void test_pool_allocator_with_list(TestSuite& suite) {
+TEST_CASE("PoolAllocator::With std::list", "[pool-allocator]") {
     MonotonicAllocator mono(8192);
     std::list<int, PoolAllocator<int>> list(PoolAllocator<int>(mono));
     
@@ -408,235 +432,193 @@ void test_pool_allocator_with_list(TestSuite& suite) {
         list.push_back(i);
     }
     
-    suite.assert_true(list.size() == 50, "List with PoolAllocator works");
+    REQUIRE(list.size() == 50);
     
     int sum = 0;
     for (auto val : list) {
         sum += val;
     }
-    suite.assert_true(sum == (49 * 50 / 2), "List values correct");
+    REQUIRE(sum == (49 * 50 / 2));
 }
 
-void test_pool_allocator_array_allocation(TestSuite& suite) {
+TEST_CASE("PoolAllocator::Array Allocation Not Pooled", "[pool-allocator]") {
     MonotonicAllocator mono(4096);
     PoolAllocator<int> alloc(mono);
     
     int* arr = alloc.allocate(10);
-    suite.assert_true(arr != nullptr, "Array allocation succeeds");
+    REQUIRE(arr != nullptr);
     
     alloc.deallocate(arr, 10);
-    suite.assert_true(alloc.poolSize() == 0, "Array not added to single element pool");
+    REQUIRE(alloc.poolSize() == 0);
 }
 
-void test_pool_allocator_null_dealloc(TestSuite& suite) {
+TEST_CASE("PoolAllocator::Deallocate Null", "[pool-allocator]") {
     MonotonicAllocator mono(1024);
     PoolAllocator<int> alloc(mono);
     
     alloc.deallocate(nullptr, 1);
-    suite.assert_true(true, "Deallocating null pointer is safe");
+    // Should not crash
 }
 
-void test_pool_allocator_copy_construction(TestSuite& suite) {
+TEST_CASE("PoolAllocator::Copy Construction Clears Pool", "[pool-allocator]") {
     MonotonicAllocator mono(4096);
     PoolAllocator<int> alloc1(mono);
     
     int* ptr1 = alloc1.allocate(1);
     alloc1.deallocate(ptr1, 1);
     
+    REQUIRE(alloc1.poolSize() == 1);
+    
     auto alloc2 = alloc1.select_on_container_copy_construction();
-    suite.assert_true(alloc2.poolSize() == 0, "Copied allocator has empty pool");
+    REQUIRE(alloc2.poolSize() == 0);
+}
+
+TEST_CASE("PoolAllocator::Allocator Comparison", "[pool-allocator]") {
+    MonotonicAllocator mono(1024);
+    PoolAllocator<int> alloc1(mono);
+    PoolAllocator<int> alloc2(mono);
+    
+    REQUIRE(alloc1 == alloc2);
+    REQUIRE(!(alloc1 != alloc2));
 }
 
 // ============================================================================
-// Edge Cases and Stress Tests
+// Edge Cases and Special Scenarios
 // ============================================================================
 
-void test_external_buffer_exhaustion(TestSuite& suite) {
-    std::cout << "\n--- Edge Cases ---" << std::endl;
-    
+TEST_CASE("Edge Case::External Buffer Exhaustion", "[edge-case]") {
     std::byte buffer[512];
     MonotonicAllocator alloc(buffer, sizeof(buffer), 512);
     
     char* ptr1 = alloc.allocate(256, 1);
-    suite.assert_true(ptr1 != nullptr, "First allocation from external buffer");
+    REQUIRE(ptr1 != nullptr);
     
     char* ptr2 = alloc.allocate(256, 1);
-    suite.assert_true(ptr2 != nullptr, "Second allocation from external buffer");
+    REQUIRE(ptr2 != nullptr);
     
-    // Next allocation should fail or use new block
     char* ptr3 = alloc.allocate(256, 1);
-    suite.assert_true(ptr3 != nullptr, "Third allocation uses new block");
-    suite.assert_true(alloc.allocatedBlocks() > 1, "New block allocated on exhaustion");
+    REQUIRE(ptr3 != nullptr);
+    
+    REQUIRE(alloc.allocatedBlocks() > 1);
 }
 
-void test_deallocate_uninitialized(TestSuite& suite) {
-    MonotonicAllocator alloc(1024);
-    alloc.deallocate(nullptr, 100);
-    suite.assert_true(true, "Deallocate does nothing (arena allocator)");
-}
-
-void test_space_needed_calculation(TestSuite& suite) {
+TEST_CASE("Edge Case::Space Calculation", "[edge-case]") {
     MonotonicAllocator alloc(1024);
     
-    size_t space1 = alloc.spaceNeeded(10, 1);
-    suite.assert_true(space1 == 10, "Space for align 1");
+    SECTION("Align 1") {
+        REQUIRE(alloc.spaceNeeded(10, 1) == 10);
+    }
     
-    size_t space2 = alloc.spaceNeeded(10, 16);
-    suite.assert_true(space2 == 16, "Space for align 16 rounds up");
+    SECTION("Align 16") {
+        REQUIRE(alloc.spaceNeeded(10, 16) == 16);
+        REQUIRE(alloc.spaceNeeded(16, 16) == 16);
+    }
     
-    size_t space3 = alloc.spaceNeeded(16, 16);
-    suite.assert_true(space3 == 16, "Space for align 16 exact");
+    SECTION("Align 64") {
+        REQUIRE(alloc.spaceNeeded(33, 64) == 64);
+        REQUIRE(alloc.spaceNeeded(64, 64) == 64);
+    }
 }
 
-void test_dynamically_allocated_blocks_count(TestSuite& suite) {
+TEST_CASE("Edge Case::Dynamically Allocated Blocks Count", "[edge-case]") {
     MonotonicAllocator alloc(256);
-    suite.assert_true(alloc.dynamicallyAllocatedBlocks() == 1, "Initial block is owned");
+    REQUIRE(alloc.dynamicallyAllocatedBlocks() == 1);
     
-    // Force allocation of more blocks
     alloc.allocate(200, 1);
     alloc.allocate(200, 1);
     
-    suite.assert_true(alloc.dynamicallyAllocatedBlocks() > 1, "Multiple owned blocks");
+    REQUIRE(alloc.dynamicallyAllocatedBlocks() > 1);
 }
 
-void test_external_buffer_only_flag(TestSuite& suite) {
+TEST_CASE("Edge Case::External Buffer Only Flag", "[edge-case]") {
     std::byte buffer[1024];
     MonotonicAllocator alloc(buffer, sizeof(buffer));
     
-    suite.assert_true(alloc.usedExternalBufferOnly(), "Only external buffer used");
+    REQUIRE(alloc.usedExternalBufferOnly());
     
     // Force dynamic allocation
     alloc.allocate(900, 1);
     alloc.allocate(900, 1);
     
-    suite.assert_true(!alloc.usedExternalBufferOnly(), "Now using dynamic blocks");
+    REQUIRE(!alloc.usedExternalBufferOnly());
 }
 
 // ============================================================================
 // Stress Tests
 // ============================================================================
 
-void test_stress_many_allocations(TestSuite& suite) {
-    std::cout << "\n--- Stress Tests ---" << std::endl;
-    
+TEST_CASE("Stress::Many Allocations", "[stress]") {
     MonotonicAllocator alloc(16384);
     std::vector<char*> ptrs;
     
     for (int i = 0; i < 100; ++i) {
         char* ptr = alloc.allocate(64, 1);
-        suite.assert_true(ptr != nullptr, "Stress allocation succeeds");
+        REQUIRE(ptr != nullptr);
         ptrs.push_back(ptr);
     }
     
-    suite.assert_true(ptrs.size() == 100, "All 100 allocations succeeded");
+    REQUIRE(ptrs.size() == 100);
 }
 
-void test_stress_various_alignments(TestSuite& suite) {
+TEST_CASE("Stress::Various Alignments", "[stress]") {
     MonotonicAllocator alloc(16384);
     
     for (int align = 1; align <= 256; align *= 2) {
         char* ptr = alloc.allocate(32, align);
-        suite.assert_true(ptr != nullptr, "Allocation with align succeeded");
+        REQUIRE(ptr != nullptr);
         
         size_t addr = reinterpret_cast<size_t>(ptr);
-        suite.assert_true((addr % align) == 0, "Alignment is correct");
+        REQUIRE((addr % align) == 0);
     }
 }
 
-void test_stress_mixed_operations(TestSuite& suite) {
+TEST_CASE("Stress::Mixed Operations", "[stress]") {
     MonotonicAllocator alloc(8192);
     
-    // Mix of single objects and arrays
     auto obj1 = alloc.construct<SimpleType>();
     auto arr1 = alloc.constructArray<SimpleType>(10);
     auto obj2 = alloc.construct<SimpleType>();
     auto arr2 = alloc.constructArray<SimpleType>(5);
     
-    suite.assert_true(obj1 != nullptr && arr1 != nullptr && 
-                     obj2 != nullptr && arr2 != nullptr,
-                     "Mixed operations succeed");
+    REQUIRE(obj1 != nullptr);
+    REQUIRE(arr1 != nullptr);
+    REQUIRE(obj2 != nullptr);
+    REQUIRE(arr2 != nullptr);
     
     alloc.destroy(obj1);
     alloc.destroyArray(arr1, 10);
     alloc.destroy(obj2);
     alloc.destroyArray(arr2, 5);
-    
-    suite.assert_true(true, "Mixed destruction succeeds");
 }
 
-// ============================================================================
-// Main Test Runner
-// ============================================================================
+TEST_CASE("Stress::Alternating Allocations and Deallocations", "[stress]") {
+    MonotonicAllocator mono(4096);
+    PoolAllocator<int> alloc(mono);
+    
+    for (int round = 0; round < 5; ++round) {
+        std::vector<int*> ptrs;
+        for (int i = 0; i < 20; ++i) {
+            int* ptr = alloc.allocate(1);
+            REQUIRE(ptr != nullptr);
+            ptrs.push_back(ptr);
+        }
+        
+        for (auto ptr : ptrs) {
+            alloc.deallocate(ptr, 1);
+        }
+    }
+    
+    REQUIRE(alloc.poolSize() == 20);
+}
 
-int main() {
-    TestSuite suite;
-
-    std::cout << "========================================" << std::endl;
-    std::cout << "MonotonicAllocator Test Suite" << std::endl;
-    std::cout << "========================================" << std::endl;
-
-    // MonotonicAllocator tests
-    test_constructor_default(suite);
-    test_constructor_with_size(suite);
-    test_constructor_with_external_buffer(suite);
-    test_constructor_invalid_external_buffer(suite);
-
-    test_allocate_basic(suite);
-    test_allocate_zero_bytes(suite);
-    test_allocate_invalid_alignment(suite);
-    test_allocate_too_large(suite);
-    test_allocate_alignment(suite);
-    test_allocate_multiple_blocks(suite);
-
-    test_available_bytes(suite);
-
-    test_construct_pod(suite);
-    test_construct_pod_with_args(suite);
-    test_construct_complex(suite);
-
-    test_construct_array(suite);
-    test_construct_array_zero_count(suite);
-
-    test_destroy_pod(suite);
-    test_destroy_null(suite);
-    test_destroy_array(suite);
-
-    test_rewind(suite);
-    test_reset(suite);
-
-    test_move_semantics(suite);
-    test_move_assignment(suite);
-
-    // BlockAllocator tests
-    test_block_allocator_default(suite);
-    test_block_allocator_with_monotonic(suite);
-    test_block_allocator_with_vector(suite);
-    test_block_allocator_zero_allocation(suite);
-    test_block_allocator_null_dealloc(suite);
-    test_block_allocator_comparison(suite);
-
-    // PoolAllocator tests
-    test_pool_allocator_default(suite);
-    test_pool_allocator_with_monotonic(suite);
-    test_pool_allocator_reuse(suite);
-    test_pool_allocator_with_list(suite);
-    test_pool_allocator_array_allocation(suite);
-    test_pool_allocator_null_dealloc(suite);
-    test_pool_allocator_copy_construction(suite);
-
-    // Edge cases
-    test_external_buffer_exhaustion(suite);
-    test_deallocate_uninitialized(suite);
-    test_space_needed_calculation(suite);
-    test_dynamically_allocated_blocks_count(suite);
-    test_external_buffer_only_flag(suite);
-
-    // Stress tests
-    test_stress_many_allocations(suite);
-    test_stress_various_alignments(suite);
-    test_stress_mixed_operations(suite);
-
-    suite.print_summary();
-
-    return suite.failed == 0 ? 0 : 1;
+TEST_CASE("Stress::Large Array Construction", "[stress]") {
+    MonotonicAllocator alloc(65536);
+    
+    SimpleType* arr = alloc.constructArray<SimpleType>(500);
+    REQUIRE(arr != nullptr);
+    
+    for (int i = 0; i < 500; ++i) {
+        REQUIRE(arr[i].x == 0);
+        REQUIRE(arr[i].y == 0);
+    }
 }
