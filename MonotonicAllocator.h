@@ -5,7 +5,6 @@
 #include <utility>
 #include <vector>
 #include <cassert>
-#include <stdexcept>
 #include <cstring>
 
 /*
@@ -15,6 +14,7 @@
  * It releases only dynamically allocated memory on destruction.
  * 
  * Thread-safety: NOT thread-safe. Use external synchronization if needed.
+ * Returns nullptr on allocation failure instead of throwing exceptions.
  * */
 class MonotonicAllocator {
 public:
@@ -75,11 +75,11 @@ public:
     }
 
     // Constructor with external buffer (zero-allocation mode)
-    explicit MonotonicAllocator(void* buffer, size_t buffer_size, size_t overflow_block_size = DefaultBlockSize) 
+    explicit MonotonicAllocator(void* buffer, size_t buffer_size, size_t overflow_block_size = DefaultBlockSize) noexcept
         : m_block_size(normalizeBlockSize(overflow_block_size))
     {
         if (buffer == nullptr || buffer_size == 0) {
-            throw std::invalid_argument("Buffer cannot be null and buffer_size must be positive");
+            return; // Invalid parameters - allocator remains uninitialized
         }
         
         try {
@@ -88,12 +88,11 @@ public:
         } catch (...) {
             m_buffer = nullptr;
             m_current = nullptr;
-            throw;
         }
     }
     
     // Constructor that allocates its own buffer
-    explicit MonotonicAllocator(size_t block_size = DefaultBlockSize) 
+    explicit MonotonicAllocator(size_t block_size = DefaultBlockSize) noexcept
         : m_block_size(normalizeBlockSize(block_size))
     {
         try {
@@ -102,7 +101,6 @@ public:
         } catch (...) {
             m_buffer = nullptr;
             m_current = nullptr;
-            throw;
         }
     }
 
@@ -139,20 +137,23 @@ public:
         return *this;
     }
 
-    [[nodiscard]] char* allocate(size_t bytes, size_t alignment) noexcept(false) {
-        if (bytes == 0) {
-            throw std::invalid_argument("Cannot allocate zero bytes");
+    // Check if allocator is properly initialized
+    [[nodiscard]] bool isValid() const noexcept {
+        return m_buffer != nullptr && m_current != nullptr;
+    }
+
+    [[nodiscard]] char* allocate(size_t bytes, size_t alignment) noexcept {
+        if (bytes == 0 || m_current == nullptr) {
+            return nullptr;
         }
         if ((alignment & (alignment - 1)) != 0 || alignment == 0) {
-            throw std::invalid_argument("Alignment must be a power of 2");
+            return nullptr; // Invalid alignment
         }
         
         if (bytes > m_block_size) {
-            throw std::bad_alloc();
+            return nullptr; // Allocation too large
         }
 
-        assert(m_current != nullptr);
-        
         // Try to allocate from current block
         auto available = getAvailableBytes();
         std::byte* aligned_pos = m_current->pos;
@@ -167,16 +168,20 @@ public:
         if (m_current->next != nullptr) {
             m_current = m_current->next;
         } else {
-            // Allocate new owned block
-            m_current->next = new storage(m_block_size);
-            m_current = m_current->next;
+            // Try to allocate new owned block
+            try {
+                m_current->next = new storage(m_block_size);
+                m_current = m_current->next;
+            } catch (...) {
+                return nullptr; // Memory allocation failed
+            }
         }
         
         // Allocate from new block
         aligned_pos = m_current->pos;
         available = m_current->size;
         if (!std::align(alignment, bytes, reinterpret_cast<void*&>(aligned_pos), available)) {
-            throw std::bad_alloc(); // Should not happen since we checked bytes <= m_block_size
+            return nullptr; // Should not happen since we checked bytes <= m_block_size
         }
         
         auto result = reinterpret_cast<char*>(aligned_pos);
@@ -223,15 +228,17 @@ public:
     }
 
     template<typename T, typename... Args>
-    [[nodiscard]] T* construct(Args&&... args) noexcept(false) {
-        // Removed restrictive even-alignment requirement
+    [[nodiscard]] T* construct(Args&&... args) noexcept {
         validateAlignment<T>();
         
         if (sizeof(T) >= m_block_size) {
-            throw std::bad_alloc();
+            return nullptr; // Type too large
         }
         
         auto tmp = allocate(sizeof(T), alignof(T));
+        if (tmp == nullptr) {
+            return nullptr;
+        }
         
         if constexpr (std::is_trivially_constructible_v<T, Args...> && sizeof...(Args) == 0) {
             // For POD types with no arguments, zero-initialize
@@ -247,19 +254,23 @@ public:
     }
     
     template<typename T>
-    [[nodiscard]] T* constructArray(size_t count) noexcept(false) {
+    [[nodiscard]] T* constructArray(size_t count) noexcept {
         validateAlignment<T>();
         
         if (count == 0) {
-            throw std::invalid_argument("Cannot construct array with zero elements");
+            return nullptr; // Invalid count
         }
         
         const size_t total_size = sizeof(T) * count;
         if (total_size > m_block_size) {
-            throw std::bad_alloc();
+            return nullptr; // Allocation too large
         }
         
         auto tmp = allocate(total_size, alignof(T));
+        if (tmp == nullptr) {
+            return nullptr;
+        }
+        
         T* array = reinterpret_cast<T*>(tmp);
         
         if constexpr (std::is_trivially_default_constructible_v<T>) {
@@ -267,18 +278,8 @@ public:
             std::memset(tmp, 0, total_size);
         } else {
             // For non-POD types, construct each element
-            try {
-                for (size_t i = 0; i < count; ++i) {
-                    new (&array[i]) T{};
-                }
-            } catch (...) {
-                // Destroy already constructed elements in reverse order
-                for (size_t i = count; i > 0; --i) {
-                    if constexpr (!std::is_trivially_destructible_v<T>) {
-                        array[i - 1].~T();
-                    }
-                }
-                throw;
+            for (size_t i = 0; i < count; ++i) {
+                new (&array[i]) T{};
             }
         }
         
@@ -364,6 +365,7 @@ private:
 /*
  * A stateful allocator to be used with std::vector/deque only.
  * Thread-safety: NOT thread-safe.
+ * Returns nullptr on allocation failure instead of throwing exceptions.
  * */
 template <class T>
 class BlockAllocator {
@@ -401,20 +403,24 @@ public:
         using other = BlockAllocator<U>;
     };
 
-    [[nodiscard]] T* allocate(std::size_t n) noexcept(false) {
+    [[nodiscard]] T* allocate(std::size_t n) noexcept {
         if (n == 0) {
-            throw std::invalid_argument("Cannot allocate zero elements");
+            return nullptr;
         }
         
         if (m_alloc == nullptr) {
-            throw std::logic_error("BlockAllocator not initialized with MonotonicAllocator");
+            return nullptr; // Not initialized
         }
         
         // Allocate using our custom alloc if we can serve, otherwise fallback to global alloc
         if (m_alloc->spaceNeeded(sizeof(T) * n, alignof(T)) <= m_alloc->blockSize()) {
             return reinterpret_cast<T*>(m_alloc->allocate(sizeof(T) * n, alignof(T)));
         } else {
-            return static_cast<T*>(::operator new(sizeof(T) * n));
+            try {
+                return static_cast<T*>(::operator new(sizeof(T) * n));
+            } catch (...) {
+                return nullptr;
+            }
         }
     }
 
@@ -455,6 +461,7 @@ template <class A, class B>
  * WARNING: Reused pointers from the pool are NOT validated. Ensure the allocator's
  * underlying storage remains valid while using this allocator.
  * Thread-safety: NOT thread-safe.
+ * Returns nullptr on allocation failure instead of throwing exceptions.
  * */
 template <class T>
 class PoolAllocator {
@@ -503,15 +510,15 @@ public:
     /* 
      * Allocates a single element or an array.
      * For single elements, attempts to reuse from pool before allocating new memory.
-     * IMPORTANT: When using with placement new, ensure you're actually invoking it.
+     * Returns nullptr on allocation failure.
      */
-    [[nodiscard]] T* allocate(std::size_t n) noexcept(false) {
+    [[nodiscard]] T* allocate(std::size_t n) noexcept {
         if (n == 0) {
-            throw std::invalid_argument("Cannot allocate zero elements");
+            return nullptr;
         }
         
         if (m_alloc == nullptr) {
-            throw std::logic_error("PoolAllocator not initialized with MonotonicAllocator");
+            return nullptr; // Not initialized
         }
         
         if (n == 1) {
@@ -529,7 +536,11 @@ public:
             if (m_alloc->spaceNeeded(sizeof(T) * n, alignof(T)) <= m_alloc->blockSize()) {
                 return reinterpret_cast<T*>(m_alloc->allocate(sizeof(T) * n, alignof(T)));
             } else {
-                return static_cast<T*>(::operator new(sizeof(T) * n));
+                try {
+                    return static_cast<T*>(::operator new(sizeof(T) * n));
+                } catch (...) {
+                    return nullptr;
+                }
             }
         }
     }
