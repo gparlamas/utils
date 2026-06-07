@@ -11,21 +11,22 @@
 // Debug Sanitizer Support
 // ============================================================================
 
+#ifdef __SANITIZER_INTERFACE_H__
+    #include <sanitizer/asan_interface.h>
+    #define ALLOCATOR_ASAN_ENABLED 1
+#else
+    #define ALLOCATOR_ASAN_ENABLED 0
+#endif
+
 #ifdef NDEBUG
     #define ALLOCATOR_DEBUG_MODE 0
 #else
     #define ALLOCATOR_DEBUG_MODE 1
 #endif
 
-#if ALLOCATOR_DEBUG_MODE
-    // Forward declare ASAN functions
-    extern "C" {
-        void __asan_poison_memory_region(void const volatile *addr, size_t size);
-        void __asan_unpoison_memory_region(void const volatile *addr, size_t size);
-    }
-    
-    #define POISON_MEMORY(addr, size) __asan_poison_memory_region((addr), (size))
-    #define UNPOISON_MEMORY(addr, size) __asan_unpoison_memory_region((addr), (size))
+#if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
+    #define POISON_MEMORY(addr, size) ASAN_POISON_MEMORY_REGION((addr), (size))
+    #define UNPOISON_MEMORY(addr, size) ASAN_UNPOISON_MEMORY_REGION((addr), (size))
     #define MARK_ALLOCATED(addr, size) UNPOISON_MEMORY((addr), (size))
     #define MARK_FREED(addr, size) POISON_MEMORY((addr), (size))
 #else
@@ -66,7 +67,7 @@ private:
             , pos(buf)
             , is_owned(true)
         {
-            #if ALLOCATOR_DEBUG_MODE
+            #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
             // Poison the entire buffer initially
             POISON_MEMORY(buf, block_size);
             pos = buf;
@@ -81,7 +82,7 @@ private:
             , pos(buf)
             , is_owned(false)
         {
-            #if ALLOCATOR_DEBUG_MODE
+            #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
             // Poison the external buffer region
             POISON_MEMORY(buf, buffer_size);
             pos = buf;
@@ -113,7 +114,7 @@ public:
             auto buf = m_buffer;
             m_buffer = m_buffer->next;
             
-            #if ALLOCATOR_DEBUG_MODE
+            #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
             if (buf->is_owned) {
                 // Unpoison before freeing
                 UNPOISON_MEMORY(buf->buf, buf->size);
@@ -175,7 +176,7 @@ public:
                 auto buf = m_buffer;
                 m_buffer = m_buffer->next;
                 
-                #if ALLOCATOR_DEBUG_MODE
+                #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
                 if (buf->is_owned) {
                     UNPOISON_MEMORY(buf->buf, buf->size);
                 }
@@ -219,7 +220,7 @@ public:
             auto result = reinterpret_cast<char*>(aligned_pos);
             m_current->pos = aligned_pos + bytes;
             
-            #if ALLOCATOR_DEBUG_MODE
+            #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
             // Unpoison the newly allocated region
             MARK_ALLOCATED(result, bytes);
             #endif
@@ -250,7 +251,7 @@ public:
         auto result = reinterpret_cast<char*>(aligned_pos);
         m_current->pos = aligned_pos + bytes;
         
-        #if ALLOCATOR_DEBUG_MODE
+        #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
         // Unpoison the newly allocated region
         MARK_ALLOCATED(result, bytes);
         #endif
@@ -395,7 +396,7 @@ public:
         for (auto block = m_buffer; block; block = block->next) {
             block->pos = block->buf;
             
-            #if ALLOCATOR_DEBUG_MODE
+            #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
             // Poison all blocks on rewind (invalidates previous allocations)
             POISON_MEMORY(block->buf, block->size);
             #endif
@@ -415,7 +416,7 @@ public:
             auto tmp = next;
             next = next->next;
             
-            #if ALLOCATOR_DEBUG_MODE
+            #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
             if (tmp->is_owned) {
                 UNPOISON_MEMORY(tmp->buf, tmp->size);
             }
@@ -428,7 +429,7 @@ public:
         m_buffer->pos = m_buffer->buf;
         m_current = m_buffer;
         
-        #if ALLOCATOR_DEBUG_MODE
+        #if ALLOCATOR_ASAN_ENABLED && ALLOCATOR_DEBUG_MODE
         // Poison the first block on reset
         POISON_MEMORY(m_buffer->buf, m_buffer->size);
         m_buffer->pos = m_buffer->buf;
